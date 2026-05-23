@@ -2,6 +2,10 @@ import { useEffect, useRef } from 'react';
 
 const COLORS = ['#8b5cf6', '#ec4899', '#06b6d4', '#a78bfa', '#f0abfc'];
 
+const isMobile = () =>
+  typeof navigator !== 'undefined' &&
+  (navigator.maxTouchPoints > 0 || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent));
+
 function createParticle(canvas) {
   return {
     x: Math.random() * canvas.width,
@@ -14,21 +18,28 @@ function createParticle(canvas) {
   };
 }
 
-export default function Particles({ count = 70 }) {
+export default function Particles({ count = 70, paused = false }) {
   const canvasRef = useRef(null);
   const particlesRef = useRef([]);
   const rafRef = useRef(null);
   const mouseRef = useRef({ x: -9999, y: -9999 });
+  const pausedRef = useRef(paused);
+
+  // Keep pausedRef in sync without triggering effect re-runs
+  pausedRef.current = paused;
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
 
+    // Use fewer particles on mobile even when active
+    const effectiveCount = isMobile() ? Math.min(count, 28) : count;
+
     const resize = () => {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
-      particlesRef.current = Array.from({ length: count }, () => createParticle(canvas));
+      particlesRef.current = Array.from({ length: effectiveCount }, () => createParticle(canvas));
     };
 
     const onMouse = (e) => { mouseRef.current = { x: e.clientX, y: e.clientY }; };
@@ -42,47 +53,52 @@ export default function Particles({ count = 70 }) {
     window.addEventListener('touchmove', onTouch, { passive: true });
 
     const draw = () => {
+      // When paused (scanner / results on mobile), skip all canvas work to free GPU/CPU
+      if (pausedRef.current) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        rafRef.current = requestAnimationFrame(draw);
+        return;
+      }
+
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const pts = particlesRef.current;
 
-      // Draw connections
-      ctx.lineWidth = 0.5;
-      for (let i = 0; i < pts.length; i++) {
-        for (let j = i + 1; j < pts.length; j++) {
-          const dx = pts[i].x - pts[j].x;
-          const dy = pts[i].y - pts[j].y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist < 130) {
-            ctx.strokeStyle = `rgba(139,92,246,${0.08 * (1 - dist / 130)})`;
-            ctx.beginPath();
-            ctx.moveTo(pts[i].x, pts[i].y);
-            ctx.lineTo(pts[j].x, pts[j].y);
-            ctx.stroke();
+      // Connections — skip on mobile to cut per-frame operations
+      if (!isMobile()) {
+        ctx.lineWidth = 0.5;
+        for (let i = 0; i < pts.length; i++) {
+          for (let j = i + 1; j < pts.length; j++) {
+            const dx = pts[i].x - pts[j].x;
+            const dy = pts[i].y - pts[j].y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < 130) {
+              ctx.strokeStyle = `rgba(139,92,246,${0.08 * (1 - dist / 130)})`;
+              ctx.beginPath();
+              ctx.moveTo(pts[i].x, pts[i].y);
+              ctx.lineTo(pts[j].x, pts[j].y);
+              ctx.stroke();
+            }
           }
         }
       }
 
-      // Draw particles and move
       for (const p of pts) {
-        // Mouse repel
         const mx = mouseRef.current.x;
         const my = mouseRef.current.y;
         const dx = p.x - mx;
         const dy = p.y - my;
         const dist = Math.sqrt(dx * dx + dy * dy);
         if (dist < 80) {
-          const force = (80 - dist) / 80 * 0.8;
+          const force = ((80 - dist) / 80) * 0.8;
           p.vx += (dx / dist) * force;
           p.vy += (dy / dist) * force;
         }
 
-        // Dampen
         p.vx *= 0.98;
         p.vy *= 0.98;
         p.x += p.vx;
         p.y += p.vy;
 
-        // Wrap
         if (p.x < -10) p.x = canvas.width + 10;
         if (p.x > canvas.width + 10) p.x = -10;
         if (p.y < -10) p.y = canvas.height + 10;
@@ -105,7 +121,7 @@ export default function Particles({ count = 70 }) {
       window.removeEventListener('mousemove', onMouse);
       window.removeEventListener('touchmove', onTouch);
     };
-  }, [count]);
+  }, [count]); // count is stable; paused is read via ref
 
   return <canvas ref={canvasRef} id="particle-canvas" />;
 }

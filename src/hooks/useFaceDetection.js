@@ -1,54 +1,14 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 
-// Lightweight skin-tone heuristic face detection using canvas sampling.
-// Samples a grid of pixels and looks for skin-tone-range colors in the center region.
-function detectFaceHeuristic(videoEl) {
-  if (!videoEl || videoEl.videoWidth === 0) return false;
-  const w = videoEl.videoWidth;
-  const h = videoEl.videoHeight;
-
-  const canvas = document.createElement('canvas');
-  const sampleW = 80;
-  const sampleH = 80;
-  canvas.width = sampleW;
-  canvas.height = sampleH;
-  const ctx = canvas.getContext('2d');
-
-  // Sample only the center 50% of the frame
-  const srcX = w * 0.25;
-  const srcY = h * 0.1;
-  const srcW = w * 0.5;
-  const srcH = h * 0.6;
-
-  ctx.drawImage(videoEl, srcX, srcY, srcW, srcH, 0, 0, sampleW, sampleH);
-  const { data } = ctx.getImageData(0, 0, sampleW, sampleH);
-
-  let skinPixels = 0;
-  const total = sampleW * sampleH;
-
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i], g = data[i + 1], b = data[i + 2];
-    if (isSkinTone(r, g, b)) skinPixels++;
-  }
-
-  const ratio = skinPixels / total;
-  return ratio > 0.12; // at least 12% skin-tone pixels
-}
+const isMobile = () =>
+  typeof navigator !== 'undefined' &&
+  (navigator.maxTouchPoints > 0 || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent));
 
 function isSkinTone(r, g, b) {
-  // HSV-based skin detection heuristic
   const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const diff = max - min;
-
-  if (max < 60) return false; // too dark
-  if (diff < 15) return false; // too gray/white
-
-  // Rough RGB rule: r > g > b, and strong red channel
-  return r > 95 && g > 40 && b > 20 &&
-         r > g && r > b &&
-         (r - g) > 15 &&
-         r < 255;
+  const diff = max - Math.min(r, g, b);
+  if (max < 60 || diff < 15) return false;
+  return r > 95 && g > 40 && b > 20 && r > g && r > b && (r - g) > 15 && r < 255;
 }
 
 export function useFaceDetection(videoRef) {
@@ -57,42 +17,83 @@ export function useFaceDetection(videoRef) {
   const intervalRef = useRef(null);
   const consecutiveRef = useRef(0);
 
+  // Single reused canvas — never re-created
+  const canvasRef = useRef(null);
+  const ctxRef = useRef(null);
+
+  const getCtx = useCallback(() => {
+    if (!canvasRef.current) {
+      canvasRef.current = document.createElement('canvas');
+      // willReadFrequently tells the browser to keep pixel data in CPU memory,
+      // eliminating the GPU→CPU readback that causes hitching / crashes on mobile.
+      ctxRef.current = canvasRef.current.getContext('2d', { willReadFrequently: true });
+    }
+    return { canvas: canvasRef.current, ctx: ctxRef.current };
+  }, []);
+
+  const detectFace = useCallback(() => {
+    const video = videoRef.current;
+    // readyState 2 = HAVE_CURRENT_DATA — safe to drawImage
+    if (!video || video.videoWidth === 0 || video.readyState < 2) return false;
+
+    const { canvas, ctx } = getCtx();
+    // Smaller sample on mobile = less pixel math + less memory pressure
+    const sampleW = isMobile() ? 40 : 72;
+    const sampleH = isMobile() ? 40 : 72;
+
+    if (canvas.width !== sampleW) canvas.width = sampleW;
+    if (canvas.height !== sampleH) canvas.height = sampleH;
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+
+    try {
+      ctx.drawImage(video, vw * 0.25, vh * 0.1, vw * 0.5, vh * 0.6, 0, 0, sampleW, sampleH);
+      const { data } = ctx.getImageData(0, 0, sampleW, sampleH);
+
+      let skin = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        if (isSkinTone(data[i], data[i + 1], data[i + 2])) skin++;
+      }
+      return skin / (sampleW * sampleH) > 0.12;
+    } catch {
+      return false;
+    }
+  }, [videoRef, getCtx]);
+
   const startDetection = useCallback(() => {
     if (intervalRef.current) return;
+    // Slower polling on mobile: less CPU contention with the camera stream
+    const interval = isMobile() ? 700 : 420;
     intervalRef.current = setInterval(() => {
-      const video = videoRef.current;
-      if (!video) return;
-
-      const detected = detectFaceHeuristic(video);
-      if (detected) {
-        consecutiveRef.current++;
-      } else {
-        consecutiveRef.current = Math.max(0, consecutiveRef.current - 1);
-      }
+      const detected = detectFace();
+      consecutiveRef.current = detected
+        ? consecutiveRef.current + 1
+        : Math.max(0, consecutiveRef.current - 1);
 
       const stable = consecutiveRef.current >= 2;
       setFaceDetected(stable);
 
       if (stable) {
-        // Synthetic face box based on center of frame
-        const w = video.videoWidth || 640;
-        const h = video.videoHeight || 480;
-        setFaceBox({
-          x: w * 0.28,
-          y: h * 0.1,
-          width: w * 0.44,
-          height: h * 0.65,
-        });
+        const video = videoRef.current;
+        const w = video?.videoWidth || 640;
+        const h = video?.videoHeight || 480;
+        setFaceBox({ x: w * 0.28, y: h * 0.1, width: w * 0.44, height: h * 0.65 });
       } else {
         setFaceBox(null);
       }
-    }, 400);
-  }, [videoRef]);
+    }, interval);
+  }, [detectFace, videoRef]);
 
   const stopDetection = useCallback(() => {
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
+    }
+    // Release the reused canvas memory
+    if (canvasRef.current) {
+      canvasRef.current.width = 0;
+      canvasRef.current.height = 0;
     }
     setFaceDetected(false);
     setFaceBox(null);
@@ -102,6 +103,10 @@ export function useFaceDetection(videoRef) {
   useEffect(() => {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
+      if (canvasRef.current) {
+        canvasRef.current.width = 0;
+        canvasRef.current.height = 0;
+      }
     };
   }, []);
 

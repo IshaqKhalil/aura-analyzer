@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion';
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { FiArrowLeft, FiAlertCircle, FiRefreshCw } from 'react-icons/fi';
 import { HiSparkles } from 'react-icons/hi';
 import { useCamera } from '../../hooks/useCamera.js';
@@ -14,6 +14,8 @@ const SCAN_STEPS = [
   { id: 5, label: 'Analyzing chaos index…', duration: 1600 },
   { id: 6, label: 'Unlocking hidden aura…', duration: 1200 },
 ];
+
+const TOTAL_DURATION = SCAN_STEPS.reduce((s, st) => s + st.duration, 0) + 1200;
 
 function ScanningRings() {
   return (
@@ -33,14 +35,13 @@ function ScanningRings() {
   );
 }
 
-function CornerBrackets({ active }) {
-  const color = active ? '#06b6d4' : '#8b5cf6';
+function CornerBrackets() {
   return (
     <>
-      <div className="scanner-corner scanner-corner-tl" style={{ borderColor: color, width: 28, height: 28 }} />
-      <div className="scanner-corner scanner-corner-tr" style={{ borderColor: color, width: 28, height: 28 }} />
-      <div className="scanner-corner scanner-corner-bl" style={{ borderColor: color, width: 28, height: 28 }} />
-      <div className="scanner-corner scanner-corner-br" style={{ borderColor: color, width: 28, height: 28 }} />
+      <div className="scanner-corner scanner-corner-tl" style={{ borderColor: '#06b6d4', width: 28, height: 28 }} />
+      <div className="scanner-corner scanner-corner-tr" style={{ borderColor: '#06b6d4', width: 28, height: 28 }} />
+      <div className="scanner-corner scanner-corner-bl" style={{ borderColor: '#06b6d4', width: 28, height: 28 }} />
+      <div className="scanner-corner scanner-corner-br" style={{ borderColor: '#06b6d4', width: 28, height: 28 }} />
     </>
   );
 }
@@ -52,11 +53,18 @@ function StepItem({ step, state }) {
       animate={{ opacity: 1, x: 0 }}
       className="flex items-center gap-2.5"
     >
-      <div className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0"
+      <div
+        className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0"
         style={{
-          background: state === 'done' ? 'rgba(52,211,153,0.2)' :
-                      state === 'active' ? 'rgba(103,232,249,0.2)' : 'rgba(255,255,255,0.05)',
-          border: `1px solid ${state === 'done' ? '#34d399' : state === 'active' ? '#67e8f9' : 'rgba(255,255,255,0.15)'}`,
+          background:
+            state === 'done' ? 'rgba(52,211,153,0.2)' :
+            state === 'active' ? 'rgba(103,232,249,0.2)' :
+            'rgba(255,255,255,0.05)',
+          border: `1px solid ${
+            state === 'done' ? '#34d399' :
+            state === 'active' ? '#67e8f9' :
+            'rgba(255,255,255,0.15)'
+          }`,
         }}
       >
         {state === 'done' ? (
@@ -69,7 +77,8 @@ function StepItem({ step, state }) {
       </div>
       <span className={`text-xs font-medium ${
         state === 'done' ? 'text-green-400' :
-        state === 'active' ? 'text-cyan-300' : 'text-white/30'
+        state === 'active' ? 'text-cyan-300' :
+        'text-white/30'
       }`}>{step.label}</span>
     </motion.div>
   );
@@ -79,77 +88,104 @@ export default function ScannerScreen({ onScanComplete, onBack }) {
   const { videoRef, status, error, startCamera, stopCamera } = useCamera();
   const { faceDetected, startDetection, stopDetection } = useFaceDetection(videoRef);
 
-  const [phase, setPhase] = useState('init'); // init | scanning | complete | error
+  const [phase, setPhase] = useState('init');
   const [currentStep, setCurrentStep] = useState(0);
   const [completedSteps, setCompletedSteps] = useState([]);
   const [showFlash, setShowFlash] = useState(false);
-  const scanTimerRef = useRef(null);
-  const stepTimerRef = useRef(null);
 
-  const runScanSteps = useCallback(() => {
+  // Stable refs for cleanup — never trigger re-renders
+  const stopCameraRef = useRef(stopCamera);
+  const stopDetectionRef = useRef(stopDetection);
+  const onScanCompleteRef = useRef(onScanComplete);
+  stopCameraRef.current = stopCamera;
+  stopDetectionRef.current = stopDetection;
+  onScanCompleteRef.current = onScanComplete;
+
+  // Start camera once on mount
+  useEffect(() => {
+    startCamera();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Run the scan chain exactly once when camera becomes active.
+  // The cleanup `cancelled = true` ensures StrictMode's double-invoke and
+  // any mid-scan navigation both kill the chain before the next callback fires.
+  useEffect(() => {
+    if (status === 'error' || status === 'denied') {
+      setPhase('error');
+      return;
+    }
+    if (status !== 'active') return;
+
+    startDetection();
+    setPhase('scanning');
+
+    let cancelled = false;
     let stepIdx = 0;
+    let timerId = null;
+
+    const finish = () => {
+      if (cancelled) return;
+      setCurrentStep(null);
+      setShowFlash(true);
+      timerId = setTimeout(() => {
+        if (cancelled) return;
+        setShowFlash(false);
+        stopDetectionRef.current();
+        stopCameraRef.current();
+        onScanCompleteRef.current(generateAura());
+      }, 700);
+    };
+
     const runStep = () => {
+      if (cancelled) return;
       if (stepIdx >= SCAN_STEPS.length) {
-        setCurrentStep(null);
-        setShowFlash(true);
-        setTimeout(() => {
-          setShowFlash(false);
-          const result = generateAura();
-          stopDetection();
-          stopCamera();
-          onScanComplete(result);
-        }, 700);
+        finish();
         return;
       }
       setCurrentStep(stepIdx);
-      stepTimerRef.current = setTimeout(() => {
-        setCompletedSteps((prev) => [...prev, stepIdx]);
-        stepIdx++;
+      const step = SCAN_STEPS[stepIdx]; // capture before mutation
+      timerId = setTimeout(() => {
+        if (cancelled) return;
+        // Capture stepIdx value at callback time (still the same value since
+        // stepIdx hasn't been mutated yet in this closure call).
+        const completedIdx = stepIdx;
+        stepIdx += 1;
+        setCompletedSteps((prev) => [...prev, completedIdx]);
         runStep();
-      }, SCAN_STEPS[stepIdx].duration);
+      }, step.duration);
     };
-    runStep();
-  }, [onScanComplete, stopCamera, stopDetection]);
 
-  useEffect(() => {
-    startCamera();
-  }, [startCamera]);
+    // Small delay so the camera renders visibly before scan starts
+    timerId = setTimeout(runStep, 1200);
 
-  useEffect(() => {
-    if (status === 'active') {
-      startDetection();
-      setPhase('scanning');
-      scanTimerRef.current = setTimeout(runScanSteps, 1200);
-    } else if (status === 'denied' || status === 'error') {
-      setPhase('error');
-    }
-  }, [status, startDetection, runScanSteps]);
-
-  useEffect(() => {
     return () => {
-      clearTimeout(scanTimerRef.current);
-      clearTimeout(stepTimerRef.current);
+      cancelled = true;
+      clearTimeout(timerId);
     };
-  }, []);
+    // startDetection is stable (useCallback with []); status is the real trigger
+  }, [status, startDetection]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleBack = () => {
-    clearTimeout(scanTimerRef.current);
-    clearTimeout(stepTimerRef.current);
     stopDetection();
     stopCamera();
     onBack();
   };
 
   const handleRetry = () => {
+    // Reset visual state fully before re-requesting camera
     setPhase('init');
     setCurrentStep(0);
     setCompletedSteps([]);
+    setShowFlash(false);
     startCamera();
   };
 
-  const totalDuration = SCAN_STEPS.reduce((s, st) => s + st.duration, 0) + 1200;
-  const elapsed = completedSteps.reduce((s, i) => s + SCAN_STEPS[i].duration, 0);
-  const progress = Math.min(100, Math.round((elapsed / totalDuration) * 100));
+  // Defensive: only sum indices that exist in SCAN_STEPS
+  const elapsed = completedSteps.reduce(
+    (s, i) => s + (SCAN_STEPS[i]?.duration ?? 0),
+    0,
+  );
+  const progress = Math.min(100, Math.round((elapsed / TOTAL_DURATION) * 100));
 
   return (
     <motion.div
@@ -195,7 +231,9 @@ export default function ScannerScreen({ onScanComplete, onBack }) {
           </div>
           <div className="text-center">
             <h3 className="text-white font-bold text-lg mb-2">Camera Access Required</h3>
-            <p className="text-white/50 text-sm max-w-xs">{error || 'Please allow camera access to scan your aura.'}</p>
+            <p className="text-white/50 text-sm max-w-xs">
+              {error || 'Please allow camera access to scan your aura.'}
+            </p>
           </div>
           <div className="flex gap-3">
             <motion.button
@@ -216,10 +254,9 @@ export default function ScannerScreen({ onScanComplete, onBack }) {
         </div>
       )}
 
-      {/* Camera view */}
+      {/* Camera + scan UI */}
       {phase !== 'error' && (
         <div className="flex-1 relative overflow-hidden">
-          {/* Video */}
           <video
             ref={videoRef}
             className="absolute inset-0 w-full h-full object-cover"
@@ -228,24 +265,16 @@ export default function ScannerScreen({ onScanComplete, onBack }) {
             autoPlay
           />
 
-          {/* Dark vignette overlay */}
-          <div className="absolute inset-0"
-            style={{ background: 'radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.7) 100%)' }} />
+          <div
+            className="absolute inset-0"
+            style={{ background: 'radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.7) 100%)' }}
+          />
 
-          {/* Grid overlay */}
-          {phase === 'scanning' && (
-            <div className="absolute inset-0 scan-grid opacity-30" />
-          )}
-
-          {/* Scan line */}
-          {phase === 'scanning' && (
-            <div className="scan-line" />
-          )}
-
-          {/* Pulsing rings */}
+          {phase === 'scanning' && <div className="absolute inset-0 scan-grid opacity-30" />}
+          {phase === 'scanning' && <div className="scan-line" />}
           {phase === 'scanning' && <ScanningRings />}
 
-          {/* Face detection box */}
+          {/* Face lock indicator */}
           <AnimatePresence>
             {faceDetected && phase === 'scanning' && (
               <motion.div
@@ -253,28 +282,21 @@ export default function ScannerScreen({ onScanComplete, onBack }) {
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0 }}
                 className="absolute"
-                style={{
-                  top: '12%',
-                  left: '20%',
-                  right: '20%',
-                  bottom: '20%',
-                }}
+                style={{ top: '12%', left: '20%', right: '20%', bottom: '20%' }}
               >
                 <div className="absolute inset-0 face-box rounded-lg">
-                  <CornerBrackets active={true} />
+                  <CornerBrackets />
                 </div>
-                <motion.div
-                  className="absolute -top-7 left-0 right-0 flex justify-center"
-                >
+                <div className="absolute -top-7 left-0 right-0 flex justify-center">
                   <span className="text-[11px] text-cyan-400 font-medium bg-black/50 px-2 py-0.5 rounded-full backdrop-blur-sm">
                     ⚡ Face Locked
                   </span>
-                </motion.div>
+                </div>
               </motion.div>
             )}
           </AnimatePresence>
 
-          {/* No face detected prompt */}
+          {/* Position prompt */}
           <AnimatePresence>
             {!faceDetected && phase === 'scanning' && status === 'active' && currentStep !== null && (
               <motion.div
@@ -290,7 +312,7 @@ export default function ScannerScreen({ onScanComplete, onBack }) {
             )}
           </AnimatePresence>
 
-          {/* Processing overlay */}
+          {/* Processing panel */}
           {phase === 'scanning' && (
             <motion.div
               initial={{ opacity: 0, y: 30 }}
@@ -298,7 +320,6 @@ export default function ScannerScreen({ onScanComplete, onBack }) {
               transition={{ delay: 0.3 }}
               className="absolute bottom-0 left-0 right-0 glass-strong p-4 pb-6 rounded-t-3xl"
             >
-              {/* Progress bar */}
               <div className="flex items-center gap-3 mb-3">
                 <HiSparkles className="text-purple-400 w-4 h-4 flex-shrink-0" />
                 <div className="flex-1 h-1.5 bg-white/10 rounded-full overflow-hidden">
@@ -317,7 +338,6 @@ export default function ScannerScreen({ onScanComplete, onBack }) {
                 <span className="text-xs text-white/40 font-mono w-8 text-right">{progress}%</span>
               </div>
 
-              {/* Steps */}
               <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
                 {SCAN_STEPS.map((step, idx) => (
                   <StepItem
@@ -325,7 +345,8 @@ export default function ScannerScreen({ onScanComplete, onBack }) {
                     step={step}
                     state={
                       completedSteps.includes(idx) ? 'done' :
-                      currentStep === idx ? 'active' : 'pending'
+                      currentStep === idx ? 'active' :
+                      'pending'
                     }
                   />
                 ))}
@@ -333,7 +354,7 @@ export default function ScannerScreen({ onScanComplete, onBack }) {
             </motion.div>
           )}
 
-          {/* Loading state */}
+          {/* Camera loading */}
           {status === 'requesting' && (
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="text-center">

@@ -30,7 +30,8 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#050508] relative">
-      <Particles count={65} />
+      {/* Pause particle animation while camera is active to free GPU on mobile */}
+      <Particles count={65} paused={screen === SCREENS.SCANNING} />
       <AnimatePresence mode="wait">
         {screen === SCREENS.LANDING && (
           <LandingScreen key="landing" onStartScan={handleStartScan} />
